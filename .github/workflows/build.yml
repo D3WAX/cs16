@@ -1,80 +1,54 @@
-name: Android Build
+name: Android CI
 
 on:
-  push:
-  pull_request:
-  workflow_dispatch:
+  push: { branches: [main] }
+  pull_request: { branches: [main] }
+  workflow_dispatch: {}
 
 concurrency:
-  group: android-${{ github.ref }}
-  cancel-in-progress: true
+  group: "android-${{ github.ref }}"
+  cancel-in-progress: false
 
 jobs:
-  android:
+  build:
     name: Build Android APK
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout sources
-        uses: actions/checkout@v5
+      - name: Checkout source
+        uses: actions/checkout@v4
         with:
-          fetch-depth: 1
           submodules: recursive
 
-      - name: Fetch YaPB history
-        run: git -C 3rdparty/yapb fetch --unshallow origin
-
-      - name: Patch bullet tracer
-        run: python3 scripts/bullet_tracer_patch.py
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ccache
-
-      - name: Setup Java
-        uses: actions/setup-java@v6
+      - name: Set up Python 3
+        uses: actions/setup-python@v5
         with:
-          java-version: 21
+          python-version: '3.x'
+
+      # Urutan patch: semuanya aman dijalankan berkali-kali
+      - name: Install client_aim (client-only)
+        run: python3 scripts/install_client_aim.py
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
           distribution: temurin
           cache: gradle
 
-      - name: Setup compilation cache
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/ccache
-          key: Android-ccache-${{ github.sha }}
-          restore-keys: |
-            Android-ccache-${{ github.ref_name }}
-            Android-ccache-
+      - name: Grant execute permission for gradlew
+        working-directory: android
+        run: chmod +x gradlew
 
       - name: Build APK
         working-directory: android
-        env:
-          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
-          KEYSTORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-          KEYSTORE_FILE_PATH: ${{ github.workspace }}/signingkey.jks
-        run: |
-          if [[ -n "$SIGNING_KEY" ]]; then
-            echo "$SIGNING_KEY" | base64 --decode > "$KEYSTORE_FILE_PATH"
-
-            ./gradlew assembleGitContinuous
-
-            mv app/build/outputs/apk/git/continuous/app-git-continuous.apk \
-              CS16Client-Android.apk
-          else
-            ./gradlew assembleGitDebug
-
-            mv app/build/outputs/apk/git/debug/app-git-debug.apk \
-              CS16Client-Android.apk
-          fi
+        run: ./gradlew assembleGitDebug
 
       - name: Upload APK
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
-          name: CS16Client-Android
-          path: android/CS16Client-Android.apk
+          name: xarph-debug-apk
+          path: android/app/build/outputs/apk/git/debug/app-git-debug.apk
           if-no-files-found: error
           retention-days: 7
+          
