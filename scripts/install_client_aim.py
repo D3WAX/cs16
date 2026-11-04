@@ -162,12 +162,26 @@ def main():
     h = read(HUD)
     if "ClientAim_Init" not in h:
         nl = "\r\n" if "\r\n" in h else "\n"
-        h = h.replace("extern void XarphESP_Init(void);", "extern void XarphESP_Init(void);" + nl + "extern void ClientAim_Init(void);", 1)
-        h = re.sub(r"([ \t]*)XarphESP_Init\(\);", lambda m: m.group(0) + nl + m.group(1) + "ClientAim_Init();", h, count=1)
+        # panggil ClientAim_Init() tepat setelah cvar "_ah" dibuat di CHud::Init (ada di semua varian repo ini)
+        m = re.search(r'^([ \t]*)CVAR_CREATE\(\s*"_ah"[^\n]*\n', h, re.M)
+        if not m:
+            sys.exit("anchor CVAR_CREATE(\"_ah\") nggak ketemu di hud.cpp -- patch dibatalkan")
+        h = h[:m.end()] + m.group(1) + "ClientAim_Init();" + nl + h[m.end():]
+        m2 = re.search(r'^void CHud\s*::\s*Init\s*\(', h, re.M)
+        if not m2:
+            sys.exit("CHud::Init nggak ketemu di hud.cpp -- patch dibatalkan")
+        h = h[:m2.start()] + "void ClientAim_Init( void );" + nl + h[m2.start():]
         write(HUD, h)
         print("[ok] cvar init dipasang")
     else:
         print("[skip] hud.cpp sudah ke-patch")
 
+    # verifikasi: kalau salah satu nggak ada, build harus gagal (jangan diam-diam)
+    for path, needle in ((INPUT, "ClientAim_Apply( cmd, viewangles )"), (HUD, "ClientAim_Init();")):
+        if needle not in read(path):
+            sys.exit("VERIFIKASI GAGAL: %s tidak berisi %s" % (path, needle))
+    print("[ok] verifikasi lolos")
+
 if __name__ == "__main__":
     main()
+																		 
