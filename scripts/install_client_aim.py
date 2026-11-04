@@ -21,19 +21,21 @@ CPP = r'''// client_aim: client-side silent aim (cmd->viewangles only; the camer
 #include "pm_defs.h"
 #include "pmtrace.h"
 #include "usercmd.h"
+#include "in_buttons.h"
 #include <math.h>
 
 extern vec3_t v_origin;
 extern vec3_t ev_punchangle;
 bool CL_IsDead( void );
 
-static cvar_t *ca_on = NULL, *ca_fov = NULL, *ca_team = NULL;
+static cvar_t *ca_on = NULL, *ca_fov = NULL, *ca_team = NULL, *ca_debug = NULL;
 
 void ClientAim_Init( void )
 {
 	ca_on   = CVAR_CREATE( "ca_on", "0", 0 );
 	ca_fov  = CVAR_CREATE( "ca_fov", "8", FCVAR_ARCHIVE );
 	ca_team = CVAR_CREATE( "ca_team", "0", 0 );
+	ca_debug = CVAR_CREATE( "ca_debug", "0", 0 );
 }
 
 static float NormYaw( float a )
@@ -52,27 +54,14 @@ static void AnglesTo( const float *from, const float *to, float *out )
 	out[2] = 0.0f;
 }
 
-static bool Visible( const float *eye, const float *pt, int targetIndex )
+static bool Visible( const float *eye, const float *pt )
 {
-	cl_entity_t *local = gEngfuncs.GetLocalPlayer();
-	pmtrace_t tr;
-
-	gEngfuncs.pEventAPI->EV_SetUpPlayerPrediction( false, true );
-	gEngfuncs.pEventAPI->EV_PushPMStates();
-	gEngfuncs.pEventAPI->EV_SetSolidPlayers( local->index - 1 );
-	gEngfuncs.pEventAPI->EV_SetTraceHull( 2 );
-	gEngfuncs.pEventAPI->EV_PlayerTrace( (float *)eye, (float *)pt, PM_STUDIO_BOX, -1, &tr );
-	gEngfuncs.pEventAPI->EV_PopPMStates();
-
-	if( tr.fraction >= 1.0f )
+	// world-only line trace; if it stops close to the target's head we hit the target itself => visible
+	pmtrace_t *tr = gEngfuncs.PM_TraceLine( (float *)eye, (float *)pt, 0 /*PM_TRACELINE_PHYSENTSONLY*/, 2 /*point hull*/, -1 );
+	if( !tr || tr->fraction >= 0.99f )
 		return true;
-	if( tr.ent > 0 )
-	{
-		physent_t *pe = gEngfuncs.pEventAPI->EV_GetPhysent( tr.ent );
-		if( pe && pe->info == targetIndex )
-			return true;
-	}
-	return false;
+	float dx = tr->endpos[0] - pt[0], dy = tr->endpos[1] - pt[1], dz = tr->endpos[2] - pt[2];
+	return ( dx * dx + dy * dy + dz * dz ) <= ( 32.0f * 32.0f );
 }
 
 void ClientAim_Apply( struct usercmd_s *cmd, const float *viewangles )
@@ -88,16 +77,24 @@ void ClientAim_Apply( struct usercmd_s *cmd, const float *viewangles )
 	const float maxFov = ca_fov ? ca_fov->value : 8.0f;
 	float bestFov = maxFov, bestAng[3] = { 0, 0, 0 };
 	bool found = false;
+	int nSeen = 0, nDead = 0, nTeam = 0, nFov = 0, nWall = 0;
 
 	for( int i = 1; i <= gEngfuncs.GetMaxClients() && i <= MAX_PLAYERS; i++ )
 	{
 		cl_entity_t *ent = gEngfuncs.GetEntityByIndex( i );
 		if( !ent || !ent->model || i == local->index )
 			continue;
+		nSeen++;
 		if( ent->curstate.spectator || g_PlayerExtraInfo[i].dead )
+		{
+			nDead++;
 			continue;
+		}
 		if( ca_team->value == 0.0f && g_PlayerExtraInfo[i].teamnumber == myTeam )
+		{
+			nTeam++;
 			continue;
+		}
 
 		float head[3] = { ent->origin[0], ent->origin[1], ent->origin[2] + ( ent->curstate.usehull ? 8.0f : 17.0f ) };
 		float ang[3];
@@ -106,13 +103,33 @@ void ClientAim_Apply( struct usercmd_s *cmd, const float *viewangles )
 		float dp = NormYaw( ang[0] - viewangles[0] );
 		float dy = NormYaw( ang[1] - viewangles[1] );
 		float fov = sqrtf( dp * dp + dy * dy );
-		if( fov >= bestFov || !Visible( v_origin, head, i ) )
+		if( fov >= bestFov )
+		{
+			nFov++;
 			continue;
+		}
+		if( !Visible( v_origin, head ) )
+		{
+			nWall++;
+			continue;
+		}
 
 		bestFov = fov;
 		bestAng[0] = ang[0];
 		bestAng[1] = ang[1];
 		found = true;
+	}
+
+	if( ca_debug && ca_debug->value != 0.0f )
+	{
+		static float nextPrint = 0.0f;
+		float now = gEngfuncs.GetClientTime();
+		if( now >= nextPrint )
+		{
+			nextPrint = now + 0.5f;
+			gEngfuncs.Con_Printf( "[ca] seen=%d dead=%d team=%d(myteam=%d) out_of_fov=%d wall=%d fov=%.1f -> %s\n",
+				nSeen, nDead, nTeam, myTeam, nFov, nWall, maxFov, found ? "AIMING" : "no target" );
+		}
 	}
 
 	if( !found )
@@ -184,4 +201,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-																		 
+	
