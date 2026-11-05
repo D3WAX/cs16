@@ -5,7 +5,8 @@ Jalankan dari root repo:  python3 scripts/install_client_aim.py   (aman dijalank
 Console:
   ca_on 0/1      nyalain; hanya aktif saat tombol tembak ditekan
   ca_fov <der>   radius FOV dalam derajat (default 8)
-  ca_team 0/1    1 = teman satu tim juga jadi target
+  ca_team 0/1    0 = semua player (termasuk tim sendiri), 1 = musuh saja
+  ca_punch <x>   pengali kompensasi recoil (default 2; coba 1 atau 0 kalau meleset)
 Kamera lo tidak bergerak: hanya cmd->viewangles yang dikirim ke server yang diubah.
 """
 import os, re, sys
@@ -28,7 +29,7 @@ extern vec3_t v_origin;
 extern vec3_t ev_punchangle;
 bool CL_IsDead( void );
 
-static cvar_t *ca_on = NULL, *ca_fov = NULL, *ca_team = NULL, *ca_debug = NULL;
+static cvar_t *ca_on = NULL, *ca_fov = NULL, *ca_team = NULL, *ca_debug = NULL, *ca_punch = NULL;
 
 void ClientAim_Init( void )
 {
@@ -36,6 +37,7 @@ void ClientAim_Init( void )
 	ca_fov  = CVAR_CREATE( "ca_fov", "8", FCVAR_ARCHIVE );
 	ca_team = CVAR_CREATE( "ca_team", "0", 0 );
 	ca_debug = CVAR_CREATE( "ca_debug", "0", 0 );
+	ca_punch = CVAR_CREATE( "ca_punch", "2", FCVAR_ARCHIVE );
 }
 
 static float NormYaw( float a )
@@ -77,47 +79,68 @@ void ClientAim_Apply( struct usercmd_s *cmd, const float *viewangles )
 	const float maxFov = ca_fov ? ca_fov->value : 8.0f;
 	float bestFov = maxFov, bestAng[3] = { 0, 0, 0 };
 	bool found = false;
-	int nSeen = 0, nDead = 0, nTeam = 0, nFov = 0, nWall = 0;
+	int nSeen = 0, nStale = 0, nDead = 0, nTeam = 0, nFov = 0, nWall = 0;
+
+	const bool enemiesOnly = ca_team->value != 0.0f; // 0 = semua player, 1 = musuh saja
 
 	for( int i = 1; i <= gEngfuncs.GetMaxClients() && i <= MAX_PLAYERS; i++ )
 	{
 		cl_entity_t *ent = gEngfuncs.GetEntityByIndex( i );
 		if( !ent || !ent->model || i == local->index )
 			continue;
+		if( ent->curstate.messagenum < local->curstate.messagenum ) // entity basi (di luar PVS / belum ke-update)
+		{
+			nStale++;
+			continue;
+		}
 		nSeen++;
 		if( ent->curstate.spectator || g_PlayerExtraInfo[i].dead )
 		{
 			nDead++;
 			continue;
 		}
-		if( ca_team->value == 0.0f && g_PlayerExtraInfo[i].teamnumber == myTeam )
+		if( enemiesOnly )
 		{
-			nTeam++;
-			continue;
+			const int t = g_PlayerExtraInfo[i].teamnumber;
+			// tim belum diketahui (0) => anggap musuh, jangan sampai target hilang
+			if( t > 0 && myTeam > 0 && t == myTeam )
+			{
+				nTeam++;
+				continue;
+			}
 		}
 
-		float head[3] = { ent->origin[0], ent->origin[1], ent->origin[2] + ( ent->curstate.usehull ? 8.0f : 17.0f ) };
-		float ang[3];
-		AnglesTo( v_origin, head, ang );
+		const bool duck = ent->curstate.usehull != 0;
+		// urutan prioritas: kepala, dada, kaki. Ambil titik pertama yang kelihatan => deteksi lebih cepat
+		const float zOff[3] = { duck ? 8.0f : 17.0f, duck ? 0.0f : 5.0f, duck ? -10.0f : -22.0f };
+		bool inFov = false, got = false;
 
-		float dp = NormYaw( ang[0] - viewangles[0] );
-		float dy = NormYaw( ang[1] - viewangles[1] );
-		float fov = sqrtf( dp * dp + dy * dy );
-		if( fov >= bestFov )
+		for( int k = 0; k < 3 && !got; k++ )
 		{
-			nFov++;
-			continue;
-		}
-		if( !Visible( v_origin, head ) )
-		{
-			nWall++;
-			continue;
+			float pt[3] = { ent->origin[0], ent->origin[1], ent->origin[2] + zOff[k] };
+			float ang[3];
+			AnglesTo( v_origin, pt, ang );
+
+			float dp = NormYaw( ang[0] - viewangles[0] );
+			float dy = NormYaw( ang[1] - viewangles[1] );
+			float fov = sqrtf( dp * dp + dy * dy );
+			if( fov >= bestFov )
+				continue;
+			inFov = true;
+			if( !Visible( v_origin, pt ) )
+				continue;
+
+			bestFov = fov;
+			bestAng[0] = ang[0];
+			bestAng[1] = ang[1];
+			found = got = true;
 		}
 
-		bestFov = fov;
-		bestAng[0] = ang[0];
-		bestAng[1] = ang[1];
-		found = true;
+		if( !got )
+		{
+			if( inFov ) nWall++;
+			else nFov++;
+		}
 	}
 
 	if( ca_debug && ca_debug->value != 0.0f )
@@ -127,8 +150,8 @@ void ClientAim_Apply( struct usercmd_s *cmd, const float *viewangles )
 		if( now >= nextPrint )
 		{
 			nextPrint = now + 0.5f;
-			gEngfuncs.Con_Printf( "[ca] seen=%d dead=%d team=%d(myteam=%d) out_of_fov=%d wall=%d fov=%.1f -> %s\n",
-				nSeen, nDead, nTeam, myTeam, nFov, nWall, maxFov, found ? "AIMING" : "no target" );
+			gEngfuncs.Con_Printf( "[ca] seen=%d stale=%d dead=%d team=%d(myteam=%d) out_of_fov=%d wall=%d fov=%.1f -> %s\n",
+				nSeen, nStale, nDead, nTeam, myTeam, nFov, nWall, maxFov, found ? "AIMING" : "no target" );
 		}
 	}
 
@@ -137,8 +160,9 @@ void ClientAim_Apply( struct usercmd_s *cmd, const float *viewangles )
 
 	// server aims along (v_angle + punchangle), so subtract punch => also cancels recoil on the aim line
 	float oldYaw = cmd->viewangles[1];
-	cmd->viewangles[0] = bestAng[0] - ev_punchangle[0];
-	cmd->viewangles[1] = bestAng[1] - ev_punchangle[1];
+	const float pf = ca_punch ? ca_punch->value : 2.0f;
+	cmd->viewangles[0] = bestAng[0] - ev_punchangle[0] * pf;
+	cmd->viewangles[1] = bestAng[1] - ev_punchangle[1] * pf;
 
 	// keep the movement direction the same relative to the real camera
 	float d = ( oldYaw - cmd->viewangles[1] ) * (float)M_PI / 180.0f;
@@ -201,4 +225,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-	
+		
