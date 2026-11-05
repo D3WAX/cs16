@@ -32,6 +32,9 @@ jobs:
       - name: Install chams (client-only)
         run: python3 scripts/install_chams.py
 
+      - name: Install nojs
+        run: python3 scripts/install_nojs.py
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
