@@ -25,13 +25,7 @@ jobs:
         with:
           python-version: '3.x'
 
-      # Urutan patch: semuanya aman dijalankan berkali-kali
-      - name: Apply bullet_spread patch
-        run: python3 scripts/install_bullet_spread.py .
-
-      - name: Install silent_aim (server + client overlay)
-        run: python3 scripts/install_silent_aim.py
-
+      # Urutan patch: semuanya aman dijalankan berkali-ka
       - name: Install client_aim (client-only)
         run: python3 scripts/install_client_aim.py
 
