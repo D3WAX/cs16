@@ -4,9 +4,10 @@ Jalankan dari root repo:  python3 scripts/install_nojs.py   (aman dijalankan ber
 
 Console:
   nojs 0/1       nyalain/matiin. Cara pakai: TAHAN tombol lompat, auto-hop jalan sendiri.
-  nojs_air 0/1   easy air movement: saat di udara + tombol lompat ditahan, belokan mouse otomatis
-                 jadi strafe (putar kiri = strafe kiri, putar kanan = strafe kanan), jadi arah
-                 gerak ngikutin arah pandang. Perlu lagi bergerak (speed > ~50) biar aktif.
+  nojs_air 0/1   easy air movement + autostrafe optimal. Di udara dengan tombol lompat ditahan, arah dorongan
+                 dihitung otomatis pada sudut optimal terhadap arah velocity (acos((30 - accel)/speed)),
+                 sisi belok ditentukan dari putaran mouse (atau tombol A/D kalau mouse diam). Hasilnya gain
+                 speed maksimal per tick, jauh lebih cepat dari strafe kiri/kanan biasa. Aktif kalau speed > ~50.
 
 Cara kerja: tiap tick player dikirim IN_JUMP hanya saat menyentuh tanah (lompat di frame pertama
 mendarat, sebelum friction sempat makan speed) dan IN_JUMP dilepas selama di udara (CS butuh tombol
@@ -33,8 +34,11 @@ CPP = r'''// nojs: client-side auto-bhop (IN_JUMP hanya saat onground)
 
 static cvar_t *nojs = NULL, *nojs_air = NULL;
 static int g_onGround = 1;
-static int g_skip = 0;        // air/ladder: jangan sentuh tombol lompat
-static float g_speed = 0.0f;  // kecepatan horizontal dari prediksi pmove
+static int g_skip = 0;          // air/ladder: jangan sentuh tombol lompat
+static float g_vel[2] = { 0, 0 }; // velocity horizontal dari prediksi pmove
+static float g_speed = 0.0f;
+static float g_airAccel = 10.0f;  // sv_airaccelerate (CS default 10)
+static float g_maxSpeed = 250.0f;
 static float g_lastYaw = 0.0f;
 
 void NoJS_Init( void )
@@ -57,7 +61,13 @@ void NoJS_SavePM( struct playermove_s *pm )
 		return;
 	g_onGround = ( pm->onground != -1 );
 	g_skip = ( pm->waterlevel >= 2 || pm->movetype == MOVETYPE_FLY || pm->dead );
-	g_speed = sqrtf( pm->velocity[0] * pm->velocity[0] + pm->velocity[1] * pm->velocity[1] );
+	g_vel[0] = pm->velocity[0];
+	g_vel[1] = pm->velocity[1];
+	g_speed = sqrtf( g_vel[0] * g_vel[0] + g_vel[1] * g_vel[1] );
+	if( pm->movevars && pm->movevars->airaccelerate > 0.0f )
+		g_airAccel = pm->movevars->airaccelerate;
+	if( pm->maxspeed > 1.0f )
+		g_maxSpeed = pm->maxspeed;
 }
 
 // dipanggil dari CL_CreateMove (player hidup)
@@ -80,14 +90,42 @@ void NoJS_Apply( struct usercmd_s *cmd )
 		return;
 	}
 
+	// simpan input asli (buat nentuin sisi belok), lalu lepas tombol lompat di udara
+	const float keySide = cmd->sidemove;
 	cmd->buttons &= ~IN_JUMP;
 
-	// easy air movement: belokan mouse -> strafe ke arah yang sama
-	if( nojs_air && nojs_air->value != 0.0f && g_speed >= 50.0f && fabsf( dyaw ) > 0.01f )
-	{
-		cmd->forwardmove = 0.0f;
-		cmd->sidemove = ( dyaw > 0.0f ) ? -400.0f : 400.0f; // belok kiri = strafe kiri
-	}
+	if( !nojs_air || nojs_air->value == 0.0f || g_speed < 50.0f )
+		return;
+
+	// sisi belok: +1 = kiri (yaw naik), -1 = kanan. Prioritas mouse, lalu tombol A/D.
+	float dir = 0.0f;
+	if( fabsf( dyaw ) > 0.01f )
+		dir = ( dyaw > 0.0f ) ? 1.0f : -1.0f;
+	else if( keySide < -1.0f )
+		dir = 1.0f;   // A
+	else if( keySide > 1.0f )
+		dir = -1.0f;  // D
+	if( dir == 0.0f )
+		return;
+
+	// sudut optimal antara velocity dan arah dorongan (GoldSrc PM_AirAccelerate: wishspd dibatasi 30,
+	// accelspeed = airaccel * maxspeed * frametime) -> cos(theta) = (30 - accelspeed) / speed
+	float ft = cmd->msec / 1000.0f;
+	if( ft < 0.001f ) ft = 0.001f;
+	float accelspeed = g_airAccel * g_maxSpeed * ft;
+	float c = ( 30.0f - accelspeed ) / g_speed;
+	if( c > 1.0f ) c = 1.0f;
+	if( c < -1.0f ) c = -1.0f;
+	const float theta = acosf( c ) * 180.0f / (float)M_PI;
+
+	// arah dorongan (world yaw) = arah velocity digeser theta ke sisi belok
+	const float velYaw = atan2f( g_vel[1], g_vel[0] ) * 180.0f / (float)M_PI;
+	const float wishYaw = velYaw + dir * theta;
+
+	// proyeksikan ke sumbu forward/right dari view yaw saat ini (kamera nggak diubah)
+	const float rad = NormYaw( wishYaw - va[1] ) * (float)M_PI / 180.0f;
+	cmd->forwardmove = 400.0f * cosf( rad );
+	cmd->sidemove = -400.0f * sinf( rad );
 }
 '''
 
@@ -158,4 +196,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-		
