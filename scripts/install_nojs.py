@@ -3,7 +3,10 @@
 Jalankan dari root repo:  python3 scripts/install_nojs.py   (aman dijalankan berkali-kali)
 
 Console:
-  nojs 0/1   nyalain/matiin. Cara pakai: TAHAN tombol lompat, auto-hop jalan sendiri.
+  nojs 0/1       nyalain/matiin. Cara pakai: TAHAN tombol lompat, auto-hop jalan sendiri.
+  nojs_air 0/1   easy air movement: saat di udara + tombol lompat ditahan, belokan mouse otomatis
+                 jadi strafe (putar kiri = strafe kiri, putar kanan = strafe kanan), jadi arah
+                 gerak ngikutin arah pandang. Perlu lagi bergerak (speed > ~50) biar aktif.
 
 Cara kerja: tiap tick player dikirim IN_JUMP hanya saat menyentuh tanah (lompat di frame pertama
 mendarat, sebelum friction sempat makan speed) dan IN_JUMP dilepas selama di udara (CS butuh tombol
@@ -26,14 +29,25 @@ CPP = r'''// nojs: client-side auto-bhop (IN_JUMP hanya saat onground)
 #include "in_buttons.h"
 #include "pm_defs.h"
 #include "const.h"
+#include <math.h>
 
-static cvar_t *nojs = NULL;
+static cvar_t *nojs = NULL, *nojs_air = NULL;
 static int g_onGround = 1;
-static int g_skip = 0; // air/ladder: jangan sentuh tombol lompat
+static int g_skip = 0;        // air/ladder: jangan sentuh tombol lompat
+static float g_speed = 0.0f;  // kecepatan horizontal dari prediksi pmove
+static float g_lastYaw = 0.0f;
 
 void NoJS_Init( void )
 {
 	nojs = CVAR_CREATE( "nojs", "0", 0 );
+	nojs_air = CVAR_CREATE( "nojs_air", "0", 0 );
+}
+
+static float NormYaw( float a )
+{
+	while( a > 180.0f ) a -= 360.0f;
+	while( a < -180.0f ) a += 360.0f;
+	return a;
 }
 
 // dipanggil setelah prediksi pmove client
@@ -43,20 +57,37 @@ void NoJS_SavePM( struct playermove_s *pm )
 		return;
 	g_onGround = ( pm->onground != -1 );
 	g_skip = ( pm->waterlevel >= 2 || pm->movetype == MOVETYPE_FLY || pm->dead );
+	g_speed = sqrtf( pm->velocity[0] * pm->velocity[0] + pm->velocity[1] * pm->velocity[1] );
 }
 
 // dipanggil dari CL_CreateMove (player hidup)
 void NoJS_Apply( struct usercmd_s *cmd )
 {
+	// selisih yaw mouse sejak tick lalu (+ = belok kiri). Selalu diupdate biar nggak lompat nilainya.
+	float va[3];
+	gEngfuncs.GetViewAngles( va );
+	const float dyaw = NormYaw( va[1] - g_lastYaw );
+	g_lastYaw = va[1];
+
 	if( !nojs || nojs->value == 0.0f || g_skip )
 		return;
 	if( !( cmd->buttons & IN_JUMP ) ) // hanya kalau player menahan tombol lompat
 		return;
 
 	if( g_onGround )
+	{
 		cmd->buttons |= IN_JUMP;
-	else
-		cmd->buttons &= ~IN_JUMP;
+		return;
+	}
+
+	cmd->buttons &= ~IN_JUMP;
+
+	// easy air movement: belokan mouse -> strafe ke arah yang sama
+	if( nojs_air && nojs_air->value != 0.0f && g_speed >= 50.0f && fabsf( dyaw ) > 0.01f )
+	{
+		cmd->forwardmove = 0.0f;
+		cmd->sidemove = ( dyaw > 0.0f ) ? -400.0f : 400.0f; // belok kiri = strafe kiri
+	}
 }
 '''
 
@@ -127,3 +158,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+		
