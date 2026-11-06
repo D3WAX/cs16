@@ -4,6 +4,7 @@ Jalankan dari root repo:  python3 scripts/install_nojs.py   (aman dijalankan ber
 
 Console:
   nojs 0/1       nyalain/matiin. Cara pakai: TAHAN tombol lompat, auto-hop jalan sendiri.
+  nojs_debug 0/1 print status nojs_air ke console tiap 0,25 dtk (speed, theta, fm/sm)
   nojs_air 0/1   easy air movement + autostrafe optimal. Di udara dengan tombol lompat ditahan, arah dorongan
                  dihitung otomatis pada sudut optimal terhadap arah velocity (acos((30 - accel)/speed)),
                  sisi belok ditentukan dari putaran mouse (atau tombol A/D kalau mouse diam). Hasilnya gain
@@ -33,19 +34,22 @@ CPP = r'''// nojs: client-side auto-bhop (IN_JUMP hanya saat onground)
 #include "const.h"
 #include <math.h>
 
-static cvar_t *nojs = NULL, *nojs_air = NULL;
+static cvar_t *nojs = NULL, *nojs_air = NULL, *nojs_debug = NULL;
 static int g_onGround = 1;
-static int g_skip = 0;          // air/ladder: jangan sentuh tombol lompat
+static int g_skip = 0;            // air/ladder: jangan sentuh tombol lompat
 static float g_vel[2] = { 0, 0 }; // velocity horizontal dari prediksi pmove
 static float g_speed = 0.0f;
 static float g_airAccel = 10.0f;  // sv_airaccelerate (CS default 10)
 static float g_maxSpeed = 250.0f;
+static float g_frametime = 0.01f; // frametime cmd terakhir yang diprediksi
 static float g_lastYaw = 0.0f;
+static float g_dir = 0.0f;        // sisi belok yang "nempel": +1 kiri, -1 kanan, 0 belum ada
 
 void NoJS_Init( void )
 {
 	nojs = CVAR_CREATE( "nojs", "0", 0 );
 	nojs_air = CVAR_CREATE( "nojs_air", "0", 0 );
+	nojs_debug = CVAR_CREATE( "nojs_debug", "0", 0 );
 }
 
 static float NormYaw( float a )
@@ -69,6 +73,8 @@ void NoJS_SavePM( struct playermove_s *pm )
 		g_airAccel = pm->movevars->airaccelerate;
 	if( pm->maxspeed > 1.0f )
 		g_maxSpeed = pm->maxspeed;
+	if( pm->frametime > 0.001f && pm->frametime < 0.1f )
+		g_frametime = pm->frametime;
 }
 
 // dipanggil dari CL_CreateMove (player hidup)
@@ -83,11 +89,15 @@ void NoJS_Apply( struct usercmd_s *cmd )
 	if( !nojs || nojs->value == 0.0f || g_skip )
 		return;
 	if( !( cmd->buttons & IN_JUMP ) ) // hanya kalau player menahan tombol lompat
+	{
+		g_dir = 0.0f;
 		return;
+	}
 
 	if( g_onGround )
 	{
 		cmd->buttons |= IN_JUMP;
+		g_dir = 0.0f; // sisi belok di-reset tiap mendarat
 		return;
 	}
 
@@ -98,35 +108,44 @@ void NoJS_Apply( struct usercmd_s *cmd )
 	if( !nojs_air || nojs_air->value == 0.0f || g_speed < 50.0f )
 		return;
 
-	// sisi belok: +1 = kiri (yaw naik), -1 = kanan. Prioritas mouse, lalu tombol A/D.
-	float dir = 0.0f;
-	if( fabsf( dyaw ) > 0.01f )
-		dir = ( dyaw > 0.0f ) ? 1.0f : -1.0f;
-	else if( keySide < -1.0f )
-		dir = 1.0f;   // A
-	else if( keySide > 1.0f )
-		dir = -1.0f;  // D
-	if( dir == 0.0f )
+	// sisi belok "nempel": cuma berubah kalau ada putaran mouse yang jelas atau tombol A/D.
+	// (mouse/touch yang jitter nggak boleh bikin arah flip tiap tick, itu malah bikin zig-zag tanpa gain)
+	if( dyaw > 0.05f )        g_dir = 1.0f;
+	else if( dyaw < -0.05f )  g_dir = -1.0f;
+	else if( keySide < -1.0f ) g_dir = 1.0f;   // A
+	else if( keySide > 1.0f )  g_dir = -1.0f;  // D
+	if( g_dir == 0.0f )
 		return;
 
 	// sudut optimal antara velocity dan arah dorongan (GoldSrc PM_AirAccelerate: wishspd dibatasi 30,
 	// accelspeed = airaccel * maxspeed * frametime) -> cos(theta) = (30 - accelspeed) / speed
-	float ft = cmd->msec / 1000.0f;
-	if( ft < 0.001f ) ft = 0.001f;
-	float accelspeed = g_airAccel * g_maxSpeed * ft;
+	// c dibatasi [0,1] supaya arah dorongan nggak pernah lewat tegak lurus (nggak mungkin ngerem).
+	const float accelspeed = g_airAccel * g_maxSpeed * g_frametime;
 	float c = ( 30.0f - accelspeed ) / g_speed;
 	if( c > 1.0f ) c = 1.0f;
-	if( c < -1.0f ) c = -1.0f;
+	if( c < 0.0f ) c = 0.0f;
 	const float theta = acosf( c ) * 180.0f / (float)M_PI;
 
 	// arah dorongan (world yaw) = arah velocity digeser theta ke sisi belok
 	const float velYaw = atan2f( g_vel[1], g_vel[0] ) * 180.0f / (float)M_PI;
-	const float wishYaw = velYaw + dir * theta;
+	const float wishYaw = velYaw + g_dir * theta;
 
 	// proyeksikan ke sumbu forward/right dari view yaw saat ini (kamera nggak diubah)
 	const float rad = NormYaw( wishYaw - va[1] ) * (float)M_PI / 180.0f;
 	cmd->forwardmove = 400.0f * cosf( rad );
 	cmd->sidemove = -400.0f * sinf( rad );
+
+	if( nojs_debug && nojs_debug->value != 0.0f )
+	{
+		static float nextPrint = 0.0f;
+		const float now = gEngfuncs.GetClientTime();
+		if( now >= nextPrint )
+		{
+			nextPrint = now + 0.25f;
+			gEngfuncs.Con_Printf( "[js] air speed=%.0f dyaw=%.2f dir=%.0f theta=%.1f ft=%.4f accel=%.0f max=%.0f fm=%.0f sm=%.0f\n",
+				g_speed, dyaw, g_dir, theta, g_frametime, g_airAccel, g_maxSpeed, cmd->forwardmove, cmd->sidemove );
+		}
+	}
 }
 '''
 
@@ -197,3 +216,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+	
