@@ -29,6 +29,7 @@ CPP = r'''// nojs: client-side auto-bhop (IN_JUMP hanya saat onground)
 #include "usercmd.h"
 #include "in_buttons.h"
 #include "pm_defs.h"
+#include "pm_movevars.h"
 #include "const.h"
 #include <math.h>
 
