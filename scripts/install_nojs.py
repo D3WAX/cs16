@@ -5,10 +5,10 @@ Jalankan dari root repo:  python3 scripts/install_nojs.py   (aman dijalankan ber
 Console:
   nojs 0/1       nyalain/matiin. Cara pakai: TAHAN tombol lompat, auto-hop jalan sendiri.
   nojs_debug 0/1 print status nojs_air ke console tiap 0,25 dtk (speed, theta, fm/sm)
-  nojs_air 0/1   easy air movement + autostrafe optimal. Di udara dengan tombol lompat ditahan, arah dorongan
-                 dihitung otomatis pada sudut optimal terhadap arah velocity (acos((30 - accel)/speed)),
-                 sisi belok ditentukan dari putaran mouse (atau tombol A/D kalau mouse diam). Hasilnya gain
-                 speed maksimal per tick, jauh lebih cepat dari strafe kiri/kanan biasa. Aktif kalau speed > ~50.
+  nojs_air 0/1   easy air movement + autostrafe optimal. Di udara dengan tombol lompat ditahan, arah gerak
+                 (velocity) otomatis diputar MENUJU arah pandang kamera. Muter kamera = arah lari ikut muter,
+                 sambil nambah speed pada sudut optimal acos((30 - accel)/speed). Kamera lo nggak diubah.
+                 Aktif kalau speed horizontal > ~50.
 
 Cara kerja: tiap tick player dikirim IN_JUMP hanya saat menyentuh tanah (lompat di frame pertama
 mendarat, sebelum friction sempat makan speed) dan IN_JUMP dilepas selama di udara (CS butuh tombol
@@ -101,21 +101,19 @@ void NoJS_Apply( struct usercmd_s *cmd )
 		return;
 	}
 
-	// simpan input asli (buat nentuin sisi belok), lalu lepas tombol lompat di udara
-	const float keySide = cmd->sidemove;
+	// lepas tombol lompat di udara (CS butuh tombol dilepas antar lompatan)
 	cmd->buttons &= ~IN_JUMP;
 
 	if( !nojs_air || nojs_air->value == 0.0f || g_speed < 50.0f )
 		return;
 
-	// sisi belok "nempel": cuma berubah kalau ada putaran mouse yang jelas atau tombol A/D.
-	// (mouse/touch yang jitter nggak boleh bikin arah flip tiap tick, itu malah bikin zig-zag tanpa gain)
-	if( dyaw > 0.05f )        g_dir = 1.0f;
-	else if( dyaw < -0.05f )  g_dir = -1.0f;
-	else if( keySide < -1.0f ) g_dir = 1.0f;   // A
-	else if( keySide > 1.0f )  g_dir = -1.0f;  // D
-	if( g_dir == 0.0f )
-		return;
+	// arah velocity sekarang dan selisihnya terhadap arah pandang. Velocity diputar MENUJU arah pandang:
+	// pandangan di kiri velocity -> dorong ke kiri (dir=+1), di kanan -> dorong ke kanan (dir=-1).
+	// Begitu velocity sejajar pandangan, dorongan selang-seling kiri/kanan di sekitar arah pandang
+	// (tetap nambah speed, tapi arah gerak nempel ke kamera dan nggak muter sendiri).
+	const float velYaw = atan2f( g_vel[1], g_vel[0] ) * 180.0f / (float)M_PI;
+	const float diff = NormYaw( va[1] - velYaw );
+	g_dir = ( diff >= 0.0f ) ? 1.0f : -1.0f;
 
 	// sudut optimal antara velocity dan arah dorongan (GoldSrc PM_AirAccelerate: wishspd dibatasi 30,
 	// accelspeed = airaccel * maxspeed * frametime) -> cos(theta) = (30 - accelspeed) / speed
@@ -127,7 +125,6 @@ void NoJS_Apply( struct usercmd_s *cmd )
 	const float theta = acosf( c ) * 180.0f / (float)M_PI;
 
 	// arah dorongan (world yaw) = arah velocity digeser theta ke sisi belok
-	const float velYaw = atan2f( g_vel[1], g_vel[0] ) * 180.0f / (float)M_PI;
 	const float wishYaw = velYaw + g_dir * theta;
 
 	// proyeksikan ke sumbu forward/right dari view yaw saat ini (kamera nggak diubah)
@@ -142,8 +139,8 @@ void NoJS_Apply( struct usercmd_s *cmd )
 		if( now >= nextPrint )
 		{
 			nextPrint = now + 0.25f;
-			gEngfuncs.Con_Printf( "[js] air speed=%.0f dyaw=%.2f dir=%.0f theta=%.1f ft=%.4f accel=%.0f max=%.0f fm=%.0f sm=%.0f\n",
-				g_speed, dyaw, g_dir, theta, g_frametime, g_airAccel, g_maxSpeed, cmd->forwardmove, cmd->sidemove );
+			gEngfuncs.Con_Printf( "[js] air speed=%.0f view-vel=%.1f dir=%.0f theta=%.1f ft=%.4f accel=%.0f max=%.0f fm=%.0f sm=%.0f\n",
+				g_speed, diff, g_dir, theta, g_frametime, g_airAccel, g_maxSpeed, cmd->forwardmove, cmd->sidemove );
 		}
 	}
 }
